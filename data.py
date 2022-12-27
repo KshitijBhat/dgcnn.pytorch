@@ -75,9 +75,9 @@ def download_S3DIS():
 
 
 def load_data_cls(partition):
-    download_modelnet40()
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
+    #download_modelnet40()
+    #BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = '/kaggle/working' #os.path.join(BASE_DIR, 'data')
     all_data = []
     all_label = []
     for h5_name in glob.glob(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048', '*%s*.h5'%partition)):
@@ -93,9 +93,9 @@ def load_data_cls(partition):
 
 
 def load_data_partseg(partition):
-    download_shapenetpart()
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
+    # download_shapenetpart()
+    # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR =  '/kaggle/working' #os.path.join(BASE_DIR, 'data')
     all_data = []
     all_label = []
     all_seg = []
