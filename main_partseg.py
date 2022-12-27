@@ -17,12 +17,17 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from data import ShapeNetPart
-from model import DGCNN_partseg
+from model import DGCNN_partseg, DGCNN_partseg_topo
 import numpy as np
 from torch.utils.data import DataLoader
 from util import cal_loss, IOStream
 import sklearn.metrics as metrics
 from plyfile import PlyData, PlyElement
+from topologylayer.functional.levelset_dionysus import Diagramlayer as DiagramlayerToplevel
+from topologylayer.functional.utils_dionysus import top_cost, top_batch_cost
+from topologylayer.nn import AlphaLayer, BarcodePolyFeature
+
+
 
 global class_cnts
 class_indexs = np.zeros((16,), dtype=int)
@@ -154,6 +159,8 @@ def train(args, io):
     seg_start_index = train_loader.dataset.seg_start_index
     if args.model == 'dgcnn':
         model = DGCNN_partseg(args, seg_num_all).to(device)
+    if args.model == 'dgcnn_topo':
+        model = DGCNN_partseg_topo(args, seg_num_all).to(device)
     else:
         raise Exception("Not implemented")
     print(str(model))
@@ -173,122 +180,145 @@ def train(args, io):
     elif args.scheduler == 'step':
         scheduler = StepLR(opt, step_size=20, gamma=0.5)
 
-    criterion = cal_loss
+    if args.model == 'dgcnn_topo':
+        criterion = cal_loss
+        width, height = 8,8
+        axis_x = np.arange(0, width)
+        axis_y = np.arange(0, height)
+        grid_axes = np.array(np.meshgrid(axis_x, axis_y))
+        grid_axes = np.transpose(grid_axes, (1, 2, 0))
+        from scipy.spatial import Delaunay
+        tri = Delaunay(grid_axes.reshape([-1, 2]))
+        faces = tri.simplices.copy()
+        F = DiagramlayerToplevel().init_filtration(faces)
+        diagramlayerToplevel = DiagramlayerToplevel.apply
 
-    best_test_iou = 0
-    for epoch in range(args.epochs):
-        ####################
-        # Train
-        ####################
-        train_loss = 0.0
-        count = 0.0
-        model.train()
-        train_true_cls = []
-        train_pred_cls = []
-        train_true_seg = []
-        train_pred_seg = []
-        train_label_seg = []
-        for data, label, seg in train_loader:
-            seg = seg - seg_start_index
-            label_one_hot = np.zeros((label.shape[0], 16))
-            for idx in range(label.shape[0]):
-                label_one_hot[idx, label[idx]] = 1
-            label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
-            data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
-            data = data.permute(0, 2, 1)
-            batch_size = data.size()[0]
-            opt.zero_grad()
-            seg_pred = model(data, label_one_hot)
-            del data
-            del label_one_hot
-            seg_pred = seg_pred.permute(0, 2, 1).contiguous()
-            loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-            loss.backward()
-            opt.step()
-            pred = seg_pred.max(dim=2)[1]               # (batch_size, num_points)
-            count += batch_size
-            train_loss += loss.item() * batch_size
-            seg_np = seg.cpu().numpy()                  # (batch_size, num_points)
-            pred_np = pred.detach().cpu().numpy()       # (batch_size, num_points)
-            train_true_cls.append(seg_np.reshape(-1))       # (batch_size * num_points)
-            train_pred_cls.append(pred_np.reshape(-1))      # (batch_size * num_points)
-            train_true_seg.append(seg_np)
-            train_pred_seg.append(pred_np)
-            train_label_seg.append(label.reshape(-1))
-        if args.scheduler == 'cos':
-            scheduler.step()
-        elif args.scheduler == 'step':
-            if opt.param_groups[0]['lr'] > 1e-5:
+
+        best_test_iou = 0
+        for epoch in range(args.epochs):
+            ####################
+            # Train
+            ####################
+            train_loss = 0.0
+            count = 0.0
+            model.train()
+            train_true_cls = []
+            train_pred_cls = []
+            train_true_seg = []
+            train_pred_seg = []
+            train_label_seg = []
+            for data, label, seg in train_loader:
+                seg = seg - seg_start_index
+                label_one_hot = np.zeros((label.shape[0], 16))
+                for idx in range(label.shape[0]):
+                    label_one_hot[idx, label[idx]] = 1
+                label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
+                data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
+                data = data.permute(0, 2, 1)
+                batch_size = data.size()[0]
+                opt.zero_grad()
+                seg_pred, hidden1, hidden2, hidden3, bottleneck = model(data, label_one_hot)
+                del data
+                del label_one_hot
+
+                # Top Losses
+                top_loss_hidden1 = top_batch_cost(hidden1.detach().cpu(), diagramlayerToplevel, F)
+                top_loss_hidden2 = top_batch_cost(hidden2.detach().cpu(), diagramlayerToplevel, F)
+                top_loss_hidden3 = top_batch_cost(hidden3.detach().cpu(), diagramlayerToplevel, F)
+                top_loss_bottleneck = top_batch_cost(bottleneck.detach().cpu(), diagramlayerToplevel, F)
+
+                seg_pred = seg_pred.permute(0, 2, 1).contiguous()
+                loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
+                
+                # Add top losses
+                loss += top_loss_hidden1 + top_loss_hidden2 + top_loss_hidden3 + top_loss_bottleneck
+                
+                loss.backward()
+                opt.step()
+                pred = seg_pred.max(dim=2)[1]               # (batch_size, num_points)
+                count += batch_size
+                train_loss += loss.item() * batch_size
+                seg_np = seg.cpu().numpy()                  # (batch_size, num_points)
+                pred_np = pred.detach().cpu().numpy()       # (batch_size, num_points)
+                train_true_cls.append(seg_np.reshape(-1))       # (batch_size * num_points)
+                train_pred_cls.append(pred_np.reshape(-1))      # (batch_size * num_points)
+                train_true_seg.append(seg_np)
+                train_pred_seg.append(pred_np)
+                train_label_seg.append(label.reshape(-1))
+            if args.scheduler == 'cos':
                 scheduler.step()
-            if opt.param_groups[0]['lr'] < 1e-5:
-                for param_group in opt.param_groups:
-                    param_group['lr'] = 1e-5
-        train_true_cls = np.concatenate(train_true_cls)
-        train_pred_cls = np.concatenate(train_pred_cls)
-        train_acc = metrics.accuracy_score(train_true_cls, train_pred_cls)
-        avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
-        train_true_seg = np.concatenate(train_true_seg, axis=0)
-        train_pred_seg = np.concatenate(train_pred_seg, axis=0)
-        train_label_seg = np.concatenate(train_label_seg)
-        train_ious = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, args.class_choice)
-        outstr = 'Train %d, loss: %.6f, train acc: %.6f, train avg acc: %.6f, train iou: %.6f' % (epoch, 
-                                                                                                  train_loss*1.0/count,
-                                                                                                  train_acc,
-                                                                                                  avg_per_class_acc,
-                                                                                                  np.mean(train_ious))
-        io.cprint(outstr)
+            elif args.scheduler == 'step':
+                if opt.param_groups[0]['lr'] > 1e-5:
+                    scheduler.step()
+                if opt.param_groups[0]['lr'] < 1e-5:
+                    for param_group in opt.param_groups:
+                        param_group['lr'] = 1e-5
+            train_true_cls = np.concatenate(train_true_cls)
+            train_pred_cls = np.concatenate(train_pred_cls)
+            train_acc = metrics.accuracy_score(train_true_cls, train_pred_cls)
+            avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
+            train_true_seg = np.concatenate(train_true_seg, axis=0)
+            train_pred_seg = np.concatenate(train_pred_seg, axis=0)
+            train_label_seg = np.concatenate(train_label_seg)
+            train_ious = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, args.class_choice)
+            outstr = 'Train %d, loss: %.6f, train acc: %.6f, train avg acc: %.6f, train iou: %.6f' % (epoch, 
+                                                                                                    train_loss*1.0/count,
+                                                                                                    train_acc,
+                                                                                                    avg_per_class_acc,
+                                                                                                    np.mean(train_ious))
+            io.cprint(outstr)
 
-        ####################
-        # Test
-        ####################
-        # test_loss = 0.0
-        # count = 0.0
-        # model.eval()
-        # test_true_cls = []
-        # test_pred_cls = []
-        # test_true_seg = []
-        # test_pred_seg = []
-        # test_label_seg = []
-        # for data, label, seg in test_loader:
-        #     seg = seg - seg_start_index
-        #     label_one_hot = np.zeros((label.shape[0], 16))
-        #     for idx in range(label.shape[0]):
-        #         label_one_hot[idx, label[idx]] = 1
-        #     label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
-        #     data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
-        #     data = data.permute(0, 2, 1)
-        #     batch_size = data.size()[0]
-        #     seg_pred = model(data, label_one_hot)
-        #     seg_pred = seg_pred.permute(0, 2, 1).contiguous()
-        #     loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-        #     pred = seg_pred.max(dim=2)[1]
-        #     count += batch_size
-        #     test_loss += loss.item() * batch_size
-        #     seg_np = seg.cpu().numpy()
-        #     pred_np = pred.detach().cpu().numpy()
-        #     test_true_cls.append(seg_np.reshape(-1))
-        #     test_pred_cls.append(pred_np.reshape(-1))
-        #     test_true_seg.append(seg_np)
-        #     test_pred_seg.append(pred_np)
-        #     test_label_seg.append(label.reshape(-1))
-        # test_true_cls = np.concatenate(test_true_cls)
-        # test_pred_cls = np.concatenate(test_pred_cls)
-        # test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
-        # avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
-        # test_true_seg = np.concatenate(test_true_seg, axis=0)
-        # test_pred_seg = np.concatenate(test_pred_seg, axis=0)
-        # test_label_seg = np.concatenate(test_label_seg)
-        # test_ious = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, args.class_choice)
-        # outstr = 'Test %d, loss: %.6f, test acc: %.6f, test avg acc: %.6f, test iou: %.6f' % (epoch,
-        #                                                                                       test_loss*1.0/count,
-        #                                                                                       test_acc,
-        #                                                                                       avg_per_class_acc,
-        #                                                                                       np.mean(test_ious))
-        # io.cprint(outstr)
-        # if np.mean(test_ious) >= best_test_iou:
-        #     best_test_iou = np.mean(test_ious)
-        if epoch%5 == 0:
-            torch.save(model.state_dict(), 'outputs/%s/models/model.t7' % args.exp_name)
+            ####################
+            # Test
+            ####################
+            # test_loss = 0.0
+            # count = 0.0
+            # model.eval()
+            # test_true_cls = []
+            # test_pred_cls = []
+            # test_true_seg = []
+            # test_pred_seg = []
+            # test_label_seg = []
+            # for data, label, seg in test_loader:
+            #     seg = seg - seg_start_index
+            #     label_one_hot = np.zeros((label.shape[0], 16))
+            #     for idx in range(label.shape[0]):
+            #         label_one_hot[idx, label[idx]] = 1
+            #     label_one_hot = torch.from_numpy(label_one_hot.astype(np.float32))
+            #     data, label_one_hot, seg = data.to(device), label_one_hot.to(device), seg.to(device)
+            #     data = data.permute(0, 2, 1)
+            #     batch_size = data.size()[0]
+            #     seg_pred = model(data, label_one_hot)
+            #     seg_pred = seg_pred.permute(0, 2, 1).contiguous()
+            #     loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
+            #     pred = seg_pred.max(dim=2)[1]
+            #     count += batch_size
+            #     test_loss += loss.item() * batch_size
+            #     seg_np = seg.cpu().numpy()
+            #     pred_np = pred.detach().cpu().numpy()
+            #     test_true_cls.append(seg_np.reshape(-1))
+            #     test_pred_cls.append(pred_np.reshape(-1))
+            #     test_true_seg.append(seg_np)
+            #     test_pred_seg.append(pred_np)
+            #     test_label_seg.append(label.reshape(-1))
+            # test_true_cls = np.concatenate(test_true_cls)
+            # test_pred_cls = np.concatenate(test_pred_cls)
+            # test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
+            # avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
+            # test_true_seg = np.concatenate(test_true_seg, axis=0)
+            # test_pred_seg = np.concatenate(test_pred_seg, axis=0)
+            # test_label_seg = np.concatenate(test_label_seg)
+            # test_ious = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, args.class_choice)
+            # outstr = 'Test %d, loss: %.6f, test acc: %.6f, test avg acc: %.6f, test iou: %.6f' % (epoch,
+            #                                                                                       test_loss*1.0/count,
+            #                                                                                       test_acc,
+            #                                                                                       avg_per_class_acc,
+            #                                                                                       np.mean(test_ious))
+            # io.cprint(outstr)
+            # if np.mean(test_ious) >= best_test_iou:
+            #     best_test_iou = np.mean(test_ious)
+            if epoch%5 == 0:
+                torch.save(model.state_dict(), 'outputs/%s/models/model.t7' % args.exp_name)
 
 
 def test(args, io):
