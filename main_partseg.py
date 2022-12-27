@@ -222,16 +222,16 @@ def train(args, io):
                 del label_one_hot
 
                 # Top Losses
-                top_loss_hidden1 = top_batch_cost(hidden1.detach().cpu(), diagramlayerToplevel, F)
-                top_loss_hidden2 = top_batch_cost(hidden2.detach().cpu(), diagramlayerToplevel, F)
-                top_loss_hidden3 = top_batch_cost(hidden3.detach().cpu(), diagramlayerToplevel, F)
+#                 top_loss_hidden1 = top_batch_cost(hidden1.detach().cpu(), diagramlayerToplevel, F)
+#                 top_loss_hidden2 = top_batch_cost(hidden2.detach().cpu(), diagramlayerToplevel, F)
+#                 top_loss_hidden3 = top_batch_cost(hidden3.detach().cpu(), diagramlayerToplevel, F)
                 top_loss_bottleneck = top_batch_cost(bottleneck.detach().cpu(), diagramlayerToplevel, F)
 
                 seg_pred = seg_pred.permute(0, 2, 1).contiguous()
                 loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
                 
                 # Add top losses
-                loss += top_loss_hidden1 + top_loss_hidden2 + top_loss_hidden3 + top_loss_bottleneck
+                loss +=  top_loss_bottleneck # + top_loss_hidden1 + top_loss_hidden2 + top_loss_hidden3
                 
                 loss.backward()
                 opt.step()
