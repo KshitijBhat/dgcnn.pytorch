@@ -377,7 +377,7 @@ if __name__ == "__main__":
     parser.add_argument('--exp_name', type=str, default='exp', metavar='N',
                         help='Name of the experiment')
     parser.add_argument('--model', type=str, default='dgcnn', metavar='N',
-                        choices=['dgcnn'],
+                        choices=['dgcnn','dgcnn_topo'],
                         help='Model to use, [dgcnn]')
     parser.add_argument('--dataset', type=str, default='shapenetpart', metavar='N',
                         choices=['shapenetpart'])
