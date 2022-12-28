@@ -213,7 +213,7 @@ class Transform_Net(nn.Module):
 
 class DGCNN_partseg_topo(nn.Module):
     def __init__(self, args, seg_num_all):
-        super(DGCNN_partseg, self).__init__()
+        super(DGCNN_partseg_topo, self).__init__()
         self.args = args
         self.seg_num_all = seg_num_all
         self.k = args.k
