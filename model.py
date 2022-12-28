@@ -310,7 +310,7 @@ class DGCNN_partseg_topo(nn.Module):
         x = self.conv10(x)                      # (batch_size, 256, num_points) -> (batch_size, 128, num_points)
         x = self.conv11(x)                      # (batch_size, 256, num_points) -> (batch_size, seg_num_all, num_points)
         
-        return x, hidden1, hidden2, hidden3, bottleneck
+        return x, bottleneck
 
 class DGCNN_partseg(nn.Module):
     def __init__(self, args, seg_num_all):
